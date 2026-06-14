@@ -52,6 +52,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # ─── ARCADE SABİTLERİ ────────────────────────────────────────────────────────
 FPS_SMOOTHING     = 10
+MAX_HP            = 250
 HASAR_MIKTARI     = {"Direkt": 10, "Krose": 15, "Aparkat": 20}
 SALDIRI_SINIFLARI = frozenset({"Direkt", "Krose", "Aparkat"})
 SAVUNMA_BLOK      = frozenset({"Savunma"})            # Hasarı tamamen iptal eder
@@ -132,7 +133,7 @@ class FighterState:
     durumunu (kuyruk, pred_history, Gate 2-3 değişkenleri) tek yerde tutar.
     """
 
-    def __init__(self, isim: str, renk: tuple, baslangic_hp: int = 100):
+    def __init__(self, isim: str, renk: tuple, baslangic_hp: int = MAX_HP):
         self.isim  = isim
         self.renk  = renk
         self.hp    = baslangic_hp
@@ -499,7 +500,7 @@ def draw_health_bars(frame, sp1: FighterState, sp2: FighterState, w: int, h: int
 
     for bar_x, sporcu in [(20, sp1), (cx + 40, sp2)]:
         cv2.rectangle(frame, (bar_x, 30), (bar_x + bar_w, 60), (0, 0, 255), -1)
-        px = int((sporcu.hp / 100.0) * bar_w)
+        px = int((sporcu.hp / MAX_HP) * bar_w)
         if px > 0:
             cv2.rectangle(frame, (bar_x, 30), (bar_x + px, 60), (0, 255, 0), -1)
         cv2.putText(frame, sporcu.isim, (bar_x, 25),
