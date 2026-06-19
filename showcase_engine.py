@@ -71,8 +71,9 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # ─── ARCADE SABİTLERİ ────────────────────────────────────────────────────────
 FPS_SMOOTHING     = 10
-MAX_HP            = 250
-HASAR_MIKTARI     = {"Direkt": 10, "Krose": 15, "Aparkat": 20}
+MAX_HP            = 100   # Arcade: her oyuncu 100 HP ile başlar
+ROUND_RESET_SN    = 3.5   # K.O sonrası canların dolup oyunun sıfırlanma gecikmesi (sn)
+HASAR_MIKTARI     = {"Direkt": 10, "Krose": 10, "Aparkat": 20}
 SALDIRI_SINIFLARI = frozenset({"Direkt", "Krose", "Aparkat"})
 SAVUNMA_BLOK      = frozenset({"Savunma"})            # Hasarı tamamen iptal eder
 RESET_SINIFLARI   = frozenset({"Idle", "Savunma"})    # Gate 3: hit_armed yeniden kuşanır
@@ -544,22 +545,17 @@ class HitDetector:
 
         Bariyer sırası (önce ucuz kontroller, sonra 3D hesaplar):
           1. Saldırı sınıfı mı?
-          2. Savunma bloğu?
-          3. Gate 3a — Cooldown
-          4. Gate 3b — State Machine (hit_armed)
-          5. Gate 2  — Genel bilek hızı (2D)
-          6. Gate Z/X/Y — Sınıfa özel 3D vektör
+          2. Gate 3a — Cooldown
+          3. Gate 3b — State Machine (hit_armed)
+          4. Gate 2  — Genel bilek hızı (2D)
+          5. Gate Z/X/Y — Sınıfa özel 3D vektör
+          6. BLOKLAMA — Kapıları geçen GERÇEK yumruk; savunan blokluyorsa 0 hasar
         """
 
         # Saldırı sınıfında değilse red sebebi yazmaya gerek yok
         sinif = saldiran.mevcut_sinif
         if sinif not in SALDIRI_SINIFLARI:
             saldiran.hit_reject_reason = ""
-            return False
-
-        # ── Savunma Bloğu ────────────────────────────────────────────────────
-        if savunan.mevcut_sinif in SAVUNMA_BLOK:
-            saldiran.hit_reject_reason = "Bloklandi: Savunma"
             return False
 
         # ── Gate 3a: Cooldown ─────────────────────────────────────────────────
@@ -599,7 +595,30 @@ class HitDetector:
                 saldiran.hit_reject_reason = "Reddedildi: Y-Atilimi Yok"
                 return False
 
-        # ── Tüm bariyerler geçildi → İSABET ──────────────────────────────────
+        # ── Tüm bariyerler geçildi → Bu GERÇEK, hasar veren bir yumruk ───────
+
+        # ── BLOKLAMA MEKANİĞİ ────────────────────────────────────────────────
+        # Yumruk geçerli; ama SAVUNAN o an "Savunma" durumundaysa hasar ENGELLENİR
+        # (0 HP). Yumruk yine de "harcanır" (cooldown + disarm + pik temizliği) →
+        # böylece "BLOCKED!" tek sefer görünür ve gard içinden hit spam'i geçilemez.
+        if savunan.mevcut_sinif in SAVUNMA_BLOK:
+            saldiran.hit_reject_reason = "Bloklandi: Savunma"
+            saldiran.son_hasar_zamani  = zaman
+            saldiran.hit_armed         = False
+            saldiran._z_thrust_buf.clear()
+            saldiran._x_sweep_buf.clear()
+            saldiran._y_thrust_buf.clear()
+            saldiran.peak_z_thrust = 0.0
+            saldiran.peak_x_sweep  = 0.0
+            saldiran.peak_y_thrust = 0.0
+            # "BLOCKED!" yazısını SAVUNANIN üzerinde göster (sarı)
+            bx = (w // 4) if "SOL" in savunan.isim else (3 * w // 4)
+            self.floating_texts.append(
+                FloatingText("BLOCKED!", bx - 95, 200, (0, 255, 255))
+            )
+            return False
+
+        # ── İSABET ───────────────────────────────────────────────────────────
         saldiran.hit_reject_reason = ""   # Başarılı hit → sıfırla
 
         hasar = HASAR_MIKTARI.get(sinif, 10)
@@ -649,17 +668,79 @@ class HitDetector:
 # BÖLÜM 6: UI Çizim Fonksiyonları
 # ═══════════════════════════════════════════════════════════════════════════════
 def draw_health_bars(frame, sp1: FighterState, sp2: FighterState, w: int, h: int):
+    """Üst köşelere şık can barları: koyu zemin + HP'ye göre renk + çerçeve + sayı."""
     cx    = w // 2
     bar_w = cx - 60
+    bar_h = 26
+    y0    = 34
     cv2.line(frame, (cx, 0), (cx, h), (0, 255, 255), 4)
 
-    for bar_x, sporcu in [(20, sp1), (cx + 40, sp2)]:
-        cv2.rectangle(frame, (bar_x, 30), (bar_x + bar_w, 60), (0, 0, 255), -1)
-        px = int((sporcu.hp / MAX_HP) * bar_w)
+    for taraf, (bar_x, sporcu) in zip(("sol", "sag"), [(20, sp1), (cx + 40, sp2)]):
+        oran = max(0.0, min(1.0, sporcu.hp / MAX_HP))
+        px   = int(oran * bar_w)
+
+        # HP'ye göre dolgu rengi: yeşil → sarı → kırmızı (arcade hissi)
+        if   oran > 0.50: dolgu = (0, 220, 0)
+        elif oran > 0.25: dolgu = (0, 215, 235)
+        else:             dolgu = (0, 60, 255)
+
+        # Koyu boş zemin → dolgu → beyaz çerçeve
+        cv2.rectangle(frame, (bar_x, y0), (bar_x + bar_w, y0 + bar_h), (40, 40, 40), -1)
         if px > 0:
-            cv2.rectangle(frame, (bar_x, 30), (bar_x + px, 60), (0, 255, 0), -1)
-        cv2.putText(frame, sporcu.isim, (bar_x, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.rectangle(frame, (bar_x, y0), (bar_x + px, y0 + bar_h), dolgu, -1)
+        cv2.rectangle(frame, (bar_x, y0), (bar_x + bar_w, y0 + bar_h), (255, 255, 255), 2)
+
+        # İsim (barın üstünde)
+        cv2.putText(frame, sporcu.isim, (bar_x, y0 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        # HP sayısı (barın içinde; dış kenara yaslı)
+        hp_yazi    = f"{sporcu.hp}/{MAX_HP}"
+        (tw, _), _ = cv2.getTextSize(hp_yazi, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        hp_x = (bar_x + bar_w - tw - 8) if taraf == "sol" else (bar_x + 8)
+        cv2.putText(frame, hp_yazi, (hp_x, y0 + bar_h - 7),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+
+
+def draw_ko_banner(frame, kazanan: str, w: int, h: int, kalan: float):
+    """K.O ekranı: yarı saydam katman + büyük 'K.O!' + kazanan + reset sayacı."""
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, h // 2 - 100), (w, h // 2 + 95), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+
+    # K.O! (büyük, kırmızı)
+    ko = "K.O!"
+    (tw, _), _ = cv2.getTextSize(ko, cv2.FONT_HERSHEY_DUPLEX, 3.0, 6)
+    cv2.putText(frame, ko, (w // 2 - tw // 2, h // 2 - 20),
+                cv2.FONT_HERSHEY_DUPLEX, 3.0, (0, 0, 255), 6, cv2.LINE_AA)
+
+    # PLAYER X WINS (sarı)
+    kazandi = f"{kazanan} WINS!"
+    (tw2, _), _ = cv2.getTextSize(kazandi, cv2.FONT_HERSHEY_DUPLEX, 1.4, 3)
+    cv2.putText(frame, kazandi, (w // 2 - tw2 // 2, h // 2 + 35),
+                cv2.FONT_HERSHEY_DUPLEX, 1.4, (0, 255, 255), 3, cv2.LINE_AA)
+
+    # Yeniden başlama sayacı
+    if kalan > 0:
+        sayac = f"Yeniden basliyor... {kalan:.1f}"
+        (tw3, _), _ = cv2.getTextSize(sayac, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        cv2.putText(frame, sayac, (w // 2 - tw3 // 2, h // 2 + 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+
+def reset_round(sp1: FighterState, sp2: FighterState) -> None:
+    """
+    Arcade round reset — YALNIZCA oyun durumu (HP / combo / hit state) sıfırlanır.
+    AI & filtre çekirdeği (kuyruk, smoother, prev_angles) bilinçli olarak korunur;
+    bir sonraki round'da canlar dolu, anti-cheat hafızası doğal akışında devam eder.
+    """
+    for sp in (sp1, sp2):
+        sp.hp                = MAX_HP
+        sp.combo_sayisi      = 0
+        sp.combo_aktif       = False
+        sp.hit_armed         = True
+        sp.son_hasar_zamani  = 0.0
+        sp.hit_reject_reason = ""
 
 
 def draw_combo_banner(frame, sporcu: FighterState, w: int, h: int, taraf: str):
@@ -787,13 +868,26 @@ def main():
     hit_detector = HitDetector()
 
     cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    # Daha büyük/keskin görüntü. Tespit maliyeti MODELE bağlıdır (çözünürlükten
+    # neredeyse bağımsız), bu yüzden pencereyi büyütmek FPS'i ciddi düşürmez.
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    # Yeniden boyutlandırılabilir pencere + 'f' ile tam ekran aç/kapat
+    PENCERE_ADI = "RingNode AI — ARCADE v3.3 (Gold Master)"
+    cv2.namedWindow(PENCERE_ADI, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(PENCERE_ADI, 1280, 720)
+    tam_ekran = False
 
     fps_queue       = deque(maxlen=FPS_SMOOTHING)
     baslangic_zamani = time.time()
     prev_time       = baslangic_zamani
     son_ts_ms       = -1   # VIDEO modu: kesinlikle artan timestamp garantisi
+
+    # ── Arcade Oyun Durumu ────────────────────────────────────────────────────
+    oyun_bitti   = False   # K.O sonrası reset bekleme modu
+    bitis_zamani = 0.0     # K.O anının zaman damgası
+    kazanan      = ""      # "P1" / "P2"
 
     with vision.PoseLandmarker.create_from_options(options) as landmarker:
         while cap.isOpened():
@@ -805,9 +899,12 @@ def main():
             h, w, _ = frame.shape
 
             now = time.time()
-            # RC-1: dt Clamping — taban VE tavan.
-            dt  = float(np.clip(now - prev_time, 0.015, 0.100))
-            fps_queue.append(1.0 / dt)
+            # RC-1: dt Clamping — taban VE tavan (AI/velocity için; DOKUNULMADI).
+            ham_dt = now - prev_time                        # gerçek kare süresi (ekran)
+            dt     = float(np.clip(ham_dt, 0.015, 0.100))   # fizik/velocity için clamp'li
+            # FPS göstergesi HAM süreden hesaplanır; clamp tabanı (0.1s→10fps) artık
+            # gerçek FPS'i maskelemez. Düşükse sebep model/CPU'dur, sayaç değil.
+            fps_queue.append(1.0 / max(ham_dt, 1e-6))
             prev_time = now
 
             # VIDEO modu için kesinlikle artan milisaniye timestamp
@@ -875,19 +972,16 @@ def main():
                 if not sporcu.guncellendi:
                     sporcu.reset_on_lost()
 
-            # ── Hit Detection (Gate 2 + Gate Z/X/Y + Gate 3 burada) ──────────
-            if sp1.guncellendi and sp2.guncellendi:
+            # ── Hit Detection (oyun bittiyse hasar DONAR) ────────────────────
+            if not oyun_bitti and sp1.guncellendi and sp2.guncellendi:
                 hit_detector.check_and_apply(sp1, sp2, now, w)
                 hit_detector.check_and_apply(sp2, sp1, now, w)
 
-            # ── Oyun Bitişi ───────────────────────────────────────────────────
-            if sp1.hp <= 0 or sp2.hp <= 0:
-                kazanan = sp1.isim if sp2.hp <= 0 else sp2.isim
-                cv2.putText(
-                    frame, f"K.O! {kazanan} KAZANDI!",
-                    (w // 4, h // 2),
-                    cv2.FONT_HERSHEY_DUPLEX, 1.5, (0, 0, 255), 4,
-                )
+            # ── Oyun Bitişi Tespiti ───────────────────────────────────────────
+            if not oyun_bitti and (sp1.hp <= 0 or sp2.hp <= 0):
+                oyun_bitti   = True
+                bitis_zamani = now
+                kazanan      = "P1" if sp2.hp <= 0 else "P2"
 
             # ── UI Katmanları ─────────────────────────────────────────────────
             draw_health_bars(frame, sp1, sp2, w, h)
@@ -895,23 +989,39 @@ def main():
             draw_combo_banner(frame, sp2, w, h, "sag")
             hit_detector.process_floating_texts(frame, now)
 
-            if DEBUG_OVERLAY:
+            if DEBUG_OVERLAY and not oyun_bitti:
                 draw_gate_debug(frame, sp1, w, h, "sol")
                 draw_gate_debug(frame, sp2, w, h, "sag")
+
+            # ── K.O Ekranı + Arcade Reset Döngüsü ────────────────────────────
+            if oyun_bitti:
+                kalan = ROUND_RESET_SN - (now - bitis_zamani)
+                draw_ko_banner(frame, kazanan, w, h, kalan)
+                if kalan <= 0:
+                    reset_round(sp1, sp2)
+                    hit_detector.floating_texts.clear()
+                    oyun_bitti = False
 
             # ── Alt Durum Çubuğu ──────────────────────────────────────────────
             fps_val = int(np.mean(fps_queue)) if fps_queue else 0
             durum   = (
                 f"P1: {sp1.mevcut_sinif}({sp1.guven:.2f}) | "
                 f"P2: {sp2.mevcut_sinif}({sp2.guven:.2f}) | "
-                f"FPS: {fps_val}"
+                f"FPS: {fps_val}  [f]Tam ekran [q]Cikis"
             )
             cv2.putText(frame, durum, (10, h - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
-            cv2.imshow("RingNode AI — ARCADE v3.3 (Gold Master)", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            cv2.imshow(PENCERE_ADI, frame)
+            tus = cv2.waitKey(1) & 0xFF
+            if tus == ord("q"):
                 break
+            elif tus == ord("f"):   # tam ekran aç/kapat
+                tam_ekran = not tam_ekran
+                cv2.setWindowProperty(
+                    PENCERE_ADI, cv2.WND_PROP_FULLSCREEN,
+                    cv2.WINDOW_FULLSCREEN if tam_ekran else cv2.WINDOW_NORMAL,
+                )
 
     cap.release()
     cv2.destroyAllWindows()
