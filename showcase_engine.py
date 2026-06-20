@@ -69,6 +69,16 @@ from utils.angle_math import extract_upper_body_angles_with_velocity
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
+import time # Zaman damgası için gerekecek
+
+# Yapay zekanın arka planda bulduğu iskeletleri tutacağımız geçici depo
+latest_pose_result = None
+
+# MediaPipe işini bitirdiğinde bu fonksiyonu tetikleyecek (Callback)
+def pose_callback(result, output_image, timestamp_ms):
+    global latest_pose_result
+    latest_pose_result = result
+    
 # ─── ARCADE SABİTLERİ ────────────────────────────────────────────────────────
 FPS_SMOOTHING     = 10
 MAX_HP            = 100   # Arcade: her oyuncu 100 HP ile başlar
@@ -850,15 +860,16 @@ def main():
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
     model.eval()
 
-    # ── MediaPipe Landmarker (Bulgu #1: VIDEO modu) ───────────────────────────
+    # ── MediaPipe Landmarker (YENİ: LIVE_STREAM modu) ───────────────────────────
     base_options = python.BaseOptions(model_asset_path=MEDIAPIPE_MODEL_PATH)
     options = vision.PoseLandmarkerOptions(
         base_options=base_options,
-        running_mode=vision.RunningMode.VIDEO,   # eğitim verisi de VIDEO modunda toplandı
+        running_mode=vision.RunningMode.LIVE_STREAM,  # Motoru Asenkron Yaptık
         num_poses=2,
         min_pose_detection_confidence=0.7,
         min_pose_presence_confidence=0.7,
-        min_tracking_confidence=0.7,             # VIDEO modunda artık ETKİN
+        min_tracking_confidence=0.7,
+        result_callback=pose_callback  # İşi bitince haber vereceği fonksiyon
     )
 
     # ── Sistem Bileşenleri ────────────────────────────────────────────────────
@@ -912,14 +923,24 @@ def main():
             if ts_ms <= son_ts_ms:
                 ts_ms = son_ts_ms + 1
             son_ts_ms = ts_ms
-
-            # ── MediaPipe Pose Tespiti (VIDEO modu = temporal tracking) ───────
+            # ── MediaPipe Pose Tespiti (LIVE_STREAM modu = Asenkron) ───────
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            result    = landmarker.detect_for_video(
-                mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb),
-                ts_ms,
-            )
-
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
+            
+            # 1. YAPAY ZEKAYA EMRİ VER VE BEKLEMEDEN GEÇ (Ana ekran dondurulmaz)
+            landmarker.detect_async(mp_image, ts_ms)
+            
+            # 2. ARKA PLANDA ÇALIŞAN HABERCİDEN (Callback) GELEN SONUCU AL
+            result = latest_pose_result
+            
+            # Eğer yapay zeka henüz ilk iskeleti bulamadıysa (boşsa), hata vermemesi için sahte (boş) bir result oluştur
+            if result is None:
+                # result objesini boş bir landmark listesi ile taklit et ki aşağıdaki kodların hata vermesin
+                class EmptyResult:
+                    pose_landmarks = []
+                result = EmptyResult()
+                
+                
             sp1.guncellendi = False
             sp2.guncellendi = False
 
